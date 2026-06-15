@@ -120,6 +120,16 @@ mod imp {
             src_w: *mut i32,
             src_h: *mut i32,
         ) -> i32;
+
+        fn akars_draw_detections(
+            image: *const u8,
+            image_len: usize,
+            boxes: *const f32,
+            classes: *const c_int,
+            scores: *const f32,
+            count: c_int,
+            out_path: *const c_char,
+        ) -> i32;
     }
 
     pub struct YoloModel {
@@ -261,6 +271,49 @@ mod imp {
             Ok(detections)
         }
 
+        /// Run inference on a standalone image (JPEG/PNG/... anything OpenCV can
+        /// decode) and write a copy with the detection boxes drawn to out_path.
+        pub fn detect_image(
+            &mut self,
+            image: &[u8],
+            out_path: &Path,
+            config: InferenceConfig,
+        ) -> Result<Vec<Detection>, TpuError> {
+            let frame = CameraFrame {
+                jpeg: image.to_vec(),
+                width: 0,
+                height: 0,
+            };
+            let detections = self.infer(&frame, config)?;
+
+            let boxes: Vec<f32> = detections
+                .iter()
+                .flat_map(|d| [d.bbox.x, d.bbox.y, d.bbox.w, d.bbox.h])
+                .collect();
+            let classes: Vec<c_int> = detections.iter().map(|d| d.cls as c_int).collect();
+            let scores: Vec<f32> = detections.iter().map(|d| d.score).collect();
+
+            let c_out = CString::new(out_path.as_os_str().as_bytes())
+                .map_err(|_| TpuError::new("output path contains NUL byte"))?;
+            let rc = unsafe {
+                akars_draw_detections(
+                    image.as_ptr(),
+                    image.len(),
+                    boxes.as_ptr(),
+                    classes.as_ptr(),
+                    scores.as_ptr(),
+                    detections.len() as c_int,
+                    c_out.as_ptr(),
+                )
+            };
+            if rc != 0 {
+                return Err(TpuError::new(format!(
+                    "failed to write annotated image: {rc}"
+                )));
+            }
+            Ok(detections)
+        }
+
         fn get_detections(&mut self, config: InferenceConfig) -> Result<Vec<Detection>, TpuError> {
             if self.output_num < 1 || self.output_shapes.is_empty() {
                 return Err(TpuError::new("model has no output tensor"));
@@ -349,6 +402,17 @@ mod imp {
         pub fn infer(
             &mut self,
             _frame: &CameraFrame,
+            _config: InferenceConfig,
+        ) -> Result<Vec<Detection>, TpuError> {
+            Err(TpuError::new(
+                "akars was built without SG2002 TPU/OpenCV runtime support",
+            ))
+        }
+
+        pub fn detect_image(
+            &mut self,
+            _image: &[u8],
+            _out_path: &Path,
             _config: InferenceConfig,
         ) -> Result<Vec<Detection>, TpuError> {
             Err(TpuError::new(

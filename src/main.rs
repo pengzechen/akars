@@ -20,10 +20,23 @@ struct Cli {
     iou: f32,
 }
 
+/// Arguments for the standalone TPU inference test: run a model on a single
+/// image file and write an annotated result image.
+#[derive(Debug)]
+struct DetectCli {
+    model: PathBuf,
+    input: PathBuf,
+    output: PathBuf,
+    classes: i32,
+    conf: f32,
+    iou: f32,
+}
+
 #[derive(Debug)]
 enum Command {
     Hunt(Cli),
     Serve(WebConfig),
+    Detect(DetectCli),
 }
 
 impl Default for Cli {
@@ -34,6 +47,19 @@ impl Default for Cli {
             motor: "/dev/ttyS3".to_string(),
             arm: "/dev/ttyS2".to_string(),
             frames: None,
+            classes: 1,
+            conf: 0.5,
+            iou: 0.5,
+        }
+    }
+}
+
+impl Default for DetectCli {
+    fn default() -> Self {
+        Self {
+            model: PathBuf::new(),
+            input: PathBuf::new(),
+            output: PathBuf::from("detect_out.jpg"),
             classes: 1,
             conf: 0.5,
             iou: 0.5,
@@ -66,6 +92,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Command::Detect(cli) => run_detect(cli),
     }
 }
 
@@ -125,12 +152,61 @@ fn run_hunt(cli: Cli) {
     run_tennis_hunter(camera, model, motor, arm, config);
 }
 
+fn run_detect(cli: DetectCli) {
+    let image = match std::fs::read(&cli.input) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("[detect] failed to read {}: {err}", cli.input.display());
+            std::process::exit(1);
+        }
+    };
+
+    let mut model = match open_model(&cli.model) {
+        Ok(model) => model,
+        Err(err) => {
+            eprintln!("[tpu] failed to open model {}: {err}", cli.model.display());
+            std::process::exit(1);
+        }
+    };
+
+    let config = InferenceConfig {
+        classes_num: cli.classes,
+        confidence_threshold: cli.conf,
+        iou_threshold: cli.iou,
+    };
+
+    match model.detect_image(&image, &cli.output, config) {
+        Ok(detections) => {
+            eprintln!(
+                "[detect] {} detection(s) on {}",
+                detections.len(),
+                cli.input.display()
+            );
+            for (i, d) in detections.iter().enumerate() {
+                eprintln!(
+                    "  #{i} class={} score={:.3} box=(cx={:.1}, cy={:.1}, w={:.1}, h={:.1})",
+                    d.cls, d.score, d.bbox.x, d.bbox.y, d.bbox.w, d.bbox.h
+                );
+            }
+            eprintln!("[detect] annotated image written to {}", cli.output.display());
+        }
+        Err(err) => {
+            eprintln!("[detect] inference failed: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn parse_cli(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut args = args.peekable();
     match args.peek().map(String::as_str) {
         Some("serve") => {
             args.next();
             parse_serve_cli(args).map(Command::Serve)
+        }
+        Some("detect") => {
+            args.next();
+            parse_detect_cli(args).map(Command::Detect)
         }
         _ => parse_hunt_cli(args).map(Command::Hunt),
     }
@@ -215,6 +291,55 @@ fn parse_serve_cli(args: impl Iterator<Item = String>) -> Result<WebConfig, Stri
     Ok(config)
 }
 
+fn parse_detect_cli(args: impl Iterator<Item = String>) -> Result<DetectCli, String> {
+    let mut cli = DetectCli::default();
+    let mut positional = 0;
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_detect_usage();
+                std::process::exit(0);
+            }
+            "-o" | "--out" => cli.output = PathBuf::from(take_value(&mut args, "--out")?),
+            "--classes" => {
+                cli.classes = take_value(&mut args, "--classes")?
+                    .parse()
+                    .map_err(|_| "--classes expects an integer".to_string())?;
+            }
+            "--conf" => {
+                cli.conf = take_value(&mut args, "--conf")?
+                    .parse()
+                    .map_err(|_| "--conf expects a float".to_string())?;
+            }
+            "--iou" => {
+                cli.iou = take_value(&mut args, "--iou")?
+                    .parse()
+                    .map_err(|_| "--iou expects a float".to_string())?;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown detect option: {value}"))
+            }
+            value => {
+                match positional {
+                    0 => cli.model = PathBuf::from(value),
+                    1 => cli.input = PathBuf::from(value),
+                    _ => return Err(format!("unexpected detect argument: {value}")),
+                }
+                positional += 1;
+            }
+        }
+    }
+
+    if cli.model.as_os_str().is_empty() {
+        return Err("missing cvimodel path".to_string());
+    }
+    if cli.input.as_os_str().is_empty() {
+        return Err("missing input image path".to_string());
+    }
+    Ok(cli)
+}
+
 fn take_value(
     args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
     option: &str,
@@ -225,7 +350,13 @@ fn take_value(
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  akars <model.cvimodel> [--camera DEV] [--motor DEV] [--arm DEV] [--frames N] [--classes N] [--conf X] [--iou X]\n  akars serve [--listen HOST:PORT] [--motor DEV] [--arm DEV] [--mock]"
+        "Usage:\n  akars <model.cvimodel> [--camera DEV] [--motor DEV] [--arm DEV] [--frames N] [--classes N] [--conf X] [--iou X]\n  akars serve [--listen HOST:PORT] [--motor DEV] [--arm DEV] [--mock]\n  akars detect <model.cvimodel> <image> [--out PATH] [--classes N] [--conf X] [--iou X]"
+    );
+}
+
+fn print_detect_usage() {
+    eprintln!(
+        "Usage: akars detect <model.cvimodel> <image> [--out PATH] [--classes N] [--conf X] [--iou X]\n\nRuns the TPU model on a single image and writes a copy with detection boxes drawn.\n\nDefaults:\n  --out detect_out.jpg\n  --classes 1\n  --conf 0.5\n  --iou 0.5"
     );
 }
 

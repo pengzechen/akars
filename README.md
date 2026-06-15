@@ -66,6 +66,17 @@ Useful options:
 - `--iou X`: NMS IOU threshold, default `0.5`.
 - `--classes N`: class count, default `1`.
 
+Test TPU inference on a single image:
+
+```bash
+./akars detect /path/to/yolo_model.cvimodel input.jpg --out result.jpg
+```
+
+Runs the model on `input.jpg`, prints each detection (class, score, box), and
+writes `result.jpg` with the boxes drawn. Same `--classes` / `--conf` / `--iou`
+options as above; `--out` defaults to `detect_out.jpg`. Useful for verifying the
+model and runtime independently of the camera and motors.
+
 Web control:
 
 ```bash

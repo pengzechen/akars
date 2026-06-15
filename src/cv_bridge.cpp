@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <vector>
@@ -51,6 +52,74 @@ extern "C" int akars_mjpeg_to_rgb_planar(const uint8_t* jpeg,
         std::memcpy(dst + 0 * channel_size, channels[0].data, channel_size);
         std::memcpy(dst + 1 * channel_size, channels[1].data, channel_size);
         std::memcpy(dst + 2 * channel_size, channels[2].data, channel_size);
+        return 0;
+    } catch (const std::exception&) {
+        return -3;
+    } catch (...) {
+        return -4;
+    }
+}
+
+// Decode an image, draw the given detection boxes on top of it, and write the
+// annotated result to out_path. Boxes are [n][4] center-form (cx, cy, w, h) in
+// original-image pixel coordinates, matching the output of correct_yolo_boxes.
+extern "C" int akars_draw_detections(const uint8_t* image,
+                                     size_t image_len,
+                                     const float* boxes,
+                                     const int* classes,
+                                     const float* scores,
+                                     int count,
+                                     const char* out_path) {
+    if (!image || image_len == 0 || !out_path || count < 0) {
+        return -1;
+    }
+    if (count > 0 && (!boxes || !classes || !scores)) {
+        return -1;
+    }
+
+    try {
+        std::vector<uint8_t> encoded(image, image + image_len);
+        cv::Mat bgr = cv::imdecode(encoded, cv::IMREAD_COLOR);
+        if (bgr.empty()) {
+            return -2;
+        }
+
+        for (int i = 0; i < count; ++i) {
+            const float cx = boxes[i * 4 + 0];
+            const float cy = boxes[i * 4 + 1];
+            const float w = boxes[i * 4 + 2];
+            const float h = boxes[i * 4 + 3];
+            const int x1 = static_cast<int>(cx - w / 2.0f);
+            const int y1 = static_cast<int>(cy - h / 2.0f);
+            const int x2 = static_cast<int>(cx + w / 2.0f);
+            const int y2 = static_cast<int>(cy + h / 2.0f);
+
+            const cv::Scalar color(0, 255, 0);
+            cv::rectangle(bgr, cv::Point(x1, y1), cv::Point(x2, y2), color, 2);
+
+            char label[64];
+            std::snprintf(label, sizeof(label), "%d %.2f", classes[i], scores[i]);
+            int baseline = 0;
+            const cv::Size text_size =
+                cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
+            const int label_top = std::max(0, y1 - text_size.height - baseline);
+            cv::rectangle(bgr,
+                          cv::Point(x1, label_top),
+                          cv::Point(x1 + text_size.width, label_top + text_size.height + baseline),
+                          color,
+                          cv::FILLED);
+            cv::putText(bgr,
+                        label,
+                        cv::Point(x1, label_top + text_size.height),
+                        cv::FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        cv::Scalar(0, 0, 0),
+                        1);
+        }
+
+        if (!cv::imwrite(out_path, bgr)) {
+            return -5;
+        }
         return 0;
     } catch (const std::exception&) {
         return -3;
